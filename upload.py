@@ -5,9 +5,16 @@ import json
 import subprocess
 from pathlib import Path
 
+MODEL_NAME = "atomwell"
+EPOCH_PATTERN = r"(\d+)"
+STEP_PATTERN = r"(\d+)"
+
 RCLONE_CONFIG = "/teamspace/studios/this_studio/bindwell/rclone.conf"
 REMOTE_DIR = "gdrive:bindwelldata"
-PATTERN = re.compile(r"^atomwell_epoch_(\d+)_step_(\d+)\.pt$")
+CHECK_INTERVAL = 5 * 60
+RETRY_DELAY = 60
+
+PATTERN = re.compile(rf"^{MODEL_NAME}_epoch_{EPOCH_PATTERN}_step_{STEP_PATTERN}\.pt$")
 
 def find_best_local_checkpoint():
     best = None
@@ -29,14 +36,8 @@ def find_best_local_checkpoint():
     return best, best_epoch, best_step
 
 def delete_older_remote_models(best_epoch, best_step):
-    # List files in remote as JSON
     result = subprocess.run(
-        [
-            "rclone",
-            "--config", RCLONE_CONFIG,
-            "lsjson",
-            REMOTE_DIR
-        ],
+        ["rclone", "--config", RCLONE_CONFIG, "lsjson", REMOTE_DIR],
         capture_output=True,
         text=True,
         check=True,
@@ -53,32 +54,20 @@ def delete_older_remote_models(best_epoch, best_step):
         epoch = int(m.group(1))
         step = int(m.group(2))
 
-        # Delete only if strictly older than current best
         if epoch < best_epoch or (epoch == best_epoch and step < best_step):
             remote_path = f"{REMOTE_DIR}/{name}"
-            print(f"[CLEANUP] Deleting remote file: {remote_path}")
+            print(f"[CLEANUP] Deleting {remote_path}")
             subprocess.run(
-                [
-                    "rclone",
-                    "--config", RCLONE_CONFIG,
-                    "deletefile",
-                    remote_path,
-                ],
+                ["rclone", "--config", RCLONE_CONFIG, "deletefile", remote_path],
                 check=True,
             )
 
 def upload_checkpoint(path):
     cmd = [
-        "rclone",
-        "--config", RCLONE_CONFIG,
-        "copy",
-        str(path),
-        REMOTE_DIR,
-        "--progress",
-        "--transfers", "8",
-        "--checkers", "8",
+        "rclone", "--config", RCLONE_CONFIG, "copy", str(path), REMOTE_DIR,
+        "--progress", "--transfers", "8", "--checkers", "8",
     ]
-    print(f"[UPLOAD] Uploading {path} to {REMOTE_DIR}")
+    print(f"[UPLOAD] Uploading {path}")
     subprocess.run(cmd, check=True)
 
 def main_loop():
@@ -86,27 +75,31 @@ def main_loop():
     last_uploaded_step = -1
 
     while True:
-        best, best_epoch, best_step = find_best_local_checkpoint()
+        try:
+            best, best_epoch, best_step = find_best_local_checkpoint()
 
-        if best is None:
-            print("[INFO] No matching .pt files found locally.")
-        else:
-            # Only upload if there's a newer best than last time
-            if (best_epoch > last_uploaded_epoch or
-                (best_epoch == last_uploaded_epoch and best_step > last_uploaded_step)):
-
-                print(f"[INFO] New best found: {best} (epoch={best_epoch}, step={best_step})")
-                upload_checkpoint(best)
-                delete_older_remote_models(best_epoch, best_step)
-
-                last_uploaded_epoch = best_epoch
-                last_uploaded_step = best_step
+            if best is None:
+                print("[INFO] No .pt files found")
             else:
-                print("[INFO] No newer checkpoint than last uploaded.")
+                if (best_epoch > last_uploaded_epoch or
+                    (best_epoch == last_uploaded_epoch and best_step > last_uploaded_step)):
 
-        # Sleep 5 minutes
-        print("[SLEEP] Waiting 5 minutes...")
-        time.sleep(2 * 60)
+                    print(f"[INFO] Found {best} (epoch={best_epoch}, step={best_step})")
+                    upload_checkpoint(best)
+                    delete_older_remote_models(best_epoch, best_step)
+
+                    last_uploaded_epoch = best_epoch
+                    last_uploaded_step = best_step
+                else:
+                    print("[INFO] No new checkpoint")
+
+            print(f"[SLEEP] Waiting {CHECK_INTERVAL // 60} minutes...")
+            time.sleep(CHECK_INTERVAL)
+
+        except Exception as e:
+            print(f"[ERROR] {e}")
+            print(f"[RETRY] Retrying in {RETRY_DELAY} seconds...")
+            time.sleep(RETRY_DELAY)
 
 if __name__ == "__main__":
     main_loop()
