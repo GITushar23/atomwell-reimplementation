@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""
-Memory-efficient tokenizer - saves in small batches to avoid numpy hanging.
-"""
-
 import numpy as np
 import os
 import gc
@@ -11,34 +7,31 @@ import random
 from pathlib import Path
 import pickle
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
 NUM_WORKERS = 32
 MAX_LEN = 2048
 MIN_SEQ_LEN = 30
-SAVE_BATCH_SIZE = 100_000  # Save every 100K sequences to avoid memory issues
+SAVE_BATCH_SIZE = 100_000
+REPORT_EVERY = 500_000
+CACHE_SIZE = 3
 
-# ============================================================================
-# VOCABULARY (CONTIGUOUS IDS)
-# ============================================================================
-# We start with only special tokens. All others (SMI_, PROT_, DNA_) will be
-# added sequentially without gaps: first SMILES chars, then protein AAs, then DNA bases.
-VOCAB = {"[PAD]": 0, "[UNK]": 1, "[MASK]": 2, "[SEP]": 3, "[SMI]": 4, "[PROT]": 5, "[DNA]": 6,"[EOS]":7}
+SMILES_FILE = "/teamspace/lightning_storage/bindwelldata/data/molecules/SMILES_random_50M.txt"
+PROTEIN_FILE = "/teamspace/lightning_storage/bindwelldata/data/proteins/uniref50.fasta"
+DNA_FILE = "/teamspace/lightning_storage/bindwelldata/data/nucleic/silva_138_2_parc_10M_plus.fasta"
 
-# AA = "ACDEFGHIKLMNPQRSTVWY"
+SMILES_CHUNKS_DIR = "/teamspace/lightning_storage/bindwelldata/data/chunks/smiles"
+PROTEIN_CHUNKS_DIR = "/teamspace/lightning_storage/bindwelldata/data/chunks/proteins"
+DNA_CHUNKS_DIR = "/teamspace/lightning_storage/bindwelldata/data/chunks/dna"
+
+VOCAB_OUTPUT = "/teamspace/lightning_storage/bindwelldata/data/vocab.npy"
+
+VOCAB = {"[PAD]": 0, "[UNK]": 1, "[SEP]": 2, "[SMI]": 3, "[PROT]": 4, "[DNA]": 5}
 AA = "ABCDEFGHIKLMNOPQRSTUVWXYZ"
-# BASES = "ACGTN"
 BASES = "ABCDGHKMNRSUVWY"
 
-
 def get_next_id():
-    """Return next available integer ID in VOCAB."""
     return max(VOCAB.values()) + 1
 
-
 def get_file_chunks(filepath, num_chunks):
-    """Split file into byte ranges at line boundaries."""
     file_size = os.path.getsize(filepath)
     chunk_size = file_size // num_chunks
     ranges = []
@@ -60,9 +53,7 @@ def get_file_chunks(filepath, num_chunks):
 
     return ranges
 
-
 def get_fasta_chunks(filepath, num_chunks):
-    """Split FASTA file at sequence boundaries."""
     file_size = os.path.getsize(filepath)
     chunk_size = file_size // num_chunks
     ranges = []
@@ -92,13 +83,7 @@ def get_fasta_chunks(filepath, num_chunks):
 
     return ranges
 
-
-# ============================================================================
-# WORKER FUNCTIONS - Save using pickle (faster than numpy for lists)
-# ============================================================================
-
 def worker_scan_smiles(args):
-    """Scan chunk for unique chars."""
     filepath, start, end, chunk_id = args
     chars = set()
     try:
@@ -112,9 +97,7 @@ def worker_scan_smiles(args):
         print(f"Chunk {chunk_id} scan error: {e}")
     return chars
 
-
 def worker_tokenize_smiles(args):
-    """Tokenize SMILES chunk - save with pickle in batches."""
     filepath, start, end, smi_map, smi_tok, unk, output_dir, chunk_id = args
 
     try:
@@ -131,7 +114,6 @@ def worker_tokenize_smiles(args):
             if s:
                 tokens.append([smi_tok] + [smi_map.get(c, unk) for c in s])
 
-                # Save batch if large enough
                 if len(tokens) >= SAVE_BATCH_SIZE:
                     out_file = os.path.join(output_dir, f"chunk_{chunk_id:03d}_batch_{batch_num:03d}.pkl")
                     with open(out_file, 'wb') as f:
@@ -140,7 +122,6 @@ def worker_tokenize_smiles(args):
                     tokens = []
                     batch_num += 1
 
-        # Save remaining
         if tokens:
             out_file = os.path.join(output_dir, f"chunk_{chunk_id:03d}_batch_{batch_num:03d}.pkl")
             with open(out_file, 'wb') as f:
@@ -155,9 +136,7 @@ def worker_tokenize_smiles(args):
         traceback.print_exc()
         return 0
 
-
 def worker_tokenize_fasta(args):
-    """Tokenize FASTA chunk - save with pickle in batches."""
     filepath, start, end, vocab_map, mod_tok, unk, min_len, output_dir, chunk_id, uppercase = args
 
     try:
@@ -183,7 +162,6 @@ def worker_tokenize_fasta(args):
                     if len(s) >= min_len:
                         sequences.append([mod_tok] + [vocab_map.get(c, unk) for c in s])
 
-                        # Save batch if large enough
                         if len(sequences) >= SAVE_BATCH_SIZE:
                             out_file = os.path.join(output_dir, f"chunk_{chunk_id:03d}_batch_{batch_num:03d}.pkl")
                             with open(out_file, 'wb') as f:
@@ -196,7 +174,6 @@ def worker_tokenize_fasta(args):
             else:
                 current_seq.append(line)
 
-        # Last sequence
         if current_seq:
             s = ''.join(current_seq)
             if uppercase:
@@ -204,7 +181,6 @@ def worker_tokenize_fasta(args):
             if len(s) >= min_len:
                 sequences.append([mod_tok] + [vocab_map.get(c, unk) for c in s])
 
-        # Save remaining
         if sequences:
             out_file = os.path.join(output_dir, f"chunk_{chunk_id:03d}_batch_{batch_num:03d}.pkl")
             with open(out_file, 'wb') as f:
@@ -219,13 +195,7 @@ def worker_tokenize_fasta(args):
         traceback.print_exc()
         return 0
 
-
-# ============================================================================
-# MAIN PROCESSING FUNCTIONS
-# ============================================================================
-
 def process_smiles(smiles_file, output_dir):
-    """Process SMILES file completely, build SMI_* vocab contiguously after special tokens."""
     print("\n" + "="*60)
     print("STEP 1: SMILES")
     print("="*60)
@@ -251,8 +221,7 @@ def process_smiles(smiles_file, output_dir):
 
     print(f"Found {len(smiles_chars)} unique chars")
 
-    # Assign SMI_* tokens contiguously
-    next_id = get_next_id()  # will be 7 initially (after adding [MASK])
+    next_id = get_next_id()
     for ch in sorted(smiles_chars):
         VOCAB[f"SMI_{ch}"] = next_id
         next_id += 1
@@ -274,12 +243,10 @@ def process_smiles(smiles_file, output_dir):
     del counts, args, byte_ranges, smi_map
     gc.collect()
 
-    print(f"✓ SMILES complete: {total:,} sequences")
+    print(f"SMILES complete: {total:,} sequences")
     return total
 
-
 def process_fasta(fasta_file, output_dir, vocab_map, mod_tok, min_len, uppercase, name):
-    """Process FASTA file completely."""
     print("\n" + "="*60)
     print(f"STEP: {name}")
     print("="*60)
@@ -312,36 +279,16 @@ def process_fasta(fasta_file, output_dir, vocab_map, mod_tok, min_len, uppercase
     del results, args, byte_ranges
     gc.collect()
 
-    print(f"✓ {name} complete: {total:,} sequences")
+    print(f"{name} complete: {total:,} sequences")
     return total
 
-
-def count_files_in_dir(d):
-    """Count pickle files."""
-    return len(list(Path(d).glob("*.pkl")))
-
-
-def stream_sequences(chunk_dir, domain):
-    """Generator to stream sequences from pickle files."""
-    pkl_files = sorted(Path(chunk_dir).glob("*.pkl"))
-    for pf in pkl_files:
-        with open(pf, 'rb') as f:
-            seqs = pickle.load(f)
-        for seq in seqs:
-            yield (seq, domain)
-        del seqs
-        gc.collect()
-
-
 def pack_all(chunk_dirs, output_dir):
-    """Pack sequences - stream from pickle files."""
     print("\n" + "="*60)
     print("PACKING")
     print("="*60)
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Count sequences first
     print("Counting sequences...")
     total_seqs = 0
     seq_counts = []
@@ -356,7 +303,6 @@ def pack_all(chunk_dirs, output_dir):
 
     print(f"Total: {total_seqs:,}")
 
-    # Create shuffled indices
     print("Creating shuffle indices...")
     indices = []
     for domain, count in enumerate(seq_counts):
@@ -365,9 +311,8 @@ def pack_all(chunk_dirs, output_dir):
     random.shuffle(indices)
     print(f"Shuffled {len(indices):,} indices")
 
-    # Build file offset maps for each domain
     print("Building file maps...")
-    file_maps = []  # For each domain: list of (file_path, start_idx, end_idx)
+    file_maps = []
 
     for d in chunk_dirs:
         fmap = []
@@ -379,7 +324,6 @@ def pack_all(chunk_dirs, output_dir):
             idx += n
         file_maps.append(fmap)
 
-    # Pack
     print("Packing into 2048-token chunks...")
     SEP_ID = VOCAB["[SEP]"]
 
@@ -389,13 +333,9 @@ def pack_all(chunk_dirs, output_dir):
 
     current_tok, current_dom, current_pos = [], [], []
 
-    # Cache: domain -> {file_path: sequences}
     cache = [{} for _ in chunk_dirs]
 
-    REPORT_EVERY = 500_000
-
     for i, (domain, seq_idx) in enumerate(indices):
-        # Find which file contains this sequence
         fmap = file_maps[domain]
         file_path = None
         local_idx = None
@@ -406,10 +346,8 @@ def pack_all(chunk_dirs, output_dir):
                 local_idx = seq_idx - start
                 break
 
-        # Load file if not cached
         if file_path not in cache[domain]:
-            # Clear cache if too big
-            if len(cache[domain]) > 3:
+            if len(cache[domain]) > CACHE_SIZE:
                 cache[domain].clear()
                 gc.collect()
 
@@ -418,7 +356,6 @@ def pack_all(chunk_dirs, output_dir):
 
         seq = cache[domain][file_path][local_idx]
 
-        # Pack logic
         if len(current_tok) + len(seq) + 1 > MAX_LEN:
             if current_tok:
                 packed_tokens.append(current_tok)
@@ -438,7 +375,6 @@ def pack_all(chunk_dirs, output_dir):
 
         if (i + 1) % REPORT_EVERY == 0:
             print(f"  {i+1:,}/{len(indices):,} - {len(packed_tokens):,} chunks")
-            # Clear caches periodically
             for c in cache:
                 c.clear()
             gc.collect()
@@ -451,9 +387,8 @@ def pack_all(chunk_dirs, output_dir):
     del indices, file_maps, cache
     gc.collect()
 
-    print(f"\n✓ Created {len(packed_tokens):,} chunks")
+    print(f"\nCreated {len(packed_tokens):,} chunks")
 
-    # Save in batches using pickle (faster)
     print("Saving packed data...")
 
     for name, data in [("packed_tokens", packed_tokens),
@@ -472,64 +407,48 @@ def pack_all(chunk_dirs, output_dir):
     del packed_tokens, packed_domains, packed_positions
     gc.collect()
 
-
-# ============================================================================
-# MAIN
-# ============================================================================
-
 def main():
-    smiles_file = "/teamspace/lightning_storage/bindwelldata/data/molecules/SMILES_random_50M.txt"
-    protein_file = "/teamspace/lightning_storage/bindwelldata/data/proteins/uniref50.fasta"
-    dna_file = "/teamspace/lightning_storage/bindwelldata/data/nucleic/silva_138_2_parc_10M_plus.fasta"
-
-    smiles_chunks = "/teamspace/lightning_storage/bindwelldata/data/chunks/smiles"
-    protein_chunks = "/teamspace/lightning_storage/bindwelldata/data/chunks/proteins"
-    dna_chunks = "/teamspace/lightning_storage/bindwelldata/data/chunks/dna"
-
-    # STEP 1: SMILES (build SMI_* vocab contiguously after specials)
-    smiles_count = process_smiles(smiles_file, smiles_chunks)
+    smiles_count = process_smiles(SMILES_FILE, SMILES_CHUNKS_DIR)
     gc.collect()
     print("RAM freed after SMILES\n")
 
-    # STEP 2: add PROT_* tokens contiguously after SMI_*
     next_id = get_next_id()
     for aa in AA:
         VOCAB[f"PROT_{aa}"] = next_id
         next_id += 1
 
-    # STEP 3: add DNA_* tokens contiguously after PROT_*
     for base in BASES:
         VOCAB[f"DNA_{base}"] = next_id
         next_id += 1
 
-    print(f"Final vocab size (SMI + PROT + DNA + specials): {len(VOCAB)}")
+    VOCAB["[MASK]"] = next_id
+    next_id += 1
+    VOCAB["[EOS]"] = next_id
 
-    # Save vocab once at the end (no gaps in IDs)
-    os.makedirs("data", exist_ok=True)
-    np.save("/teamspace/lightning_storage/bindwelldata/data/vocab.npy", VOCAB)
-    print("Saved vocab to data/vocab.npy")
+    print(f"Final vocab size: {len(VOCAB)}")
 
-    # STEP 4: PROTEINS
+    os.makedirs(os.path.dirname(VOCAB_OUTPUT), exist_ok=True)
+    np.save(VOCAB_OUTPUT, VOCAB)
+    print(f"Saved vocab to {VOCAB_OUTPUT}")
+
     prot_map = {k[5:]: v for k, v in VOCAB.items() if k.startswith("PROT_")}
     protein_count = process_fasta(
-        protein_file, protein_chunks, prot_map,
+        PROTEIN_FILE, PROTEIN_CHUNKS_DIR, prot_map,
         VOCAB["[PROT]"], MIN_SEQ_LEN, uppercase=False, name="PROTEINS"
     )
     del prot_map
     gc.collect()
     print("RAM freed after PROTEINS\n")
 
-    # STEP 5: DNA
     dna_map = {k[4:]: v for k, v in VOCAB.items() if k.startswith("DNA_")}
     dna_count = process_fasta(
-        dna_file, dna_chunks, dna_map,
+        DNA_FILE, DNA_CHUNKS_DIR, dna_map,
         VOCAB["[DNA]"], MIN_SEQ_LEN, uppercase=True, name="DNA"
     )
     del dna_map
     gc.collect()
     print("RAM freed after DNA\n")
 
-    # Summary
     print("\n" + "="*60)
     print("TOKENIZATION COMPLETE")
     print(f"  SMILES:   {smiles_count:,}")
@@ -538,11 +457,7 @@ def main():
     print(f"  Total:    {smiles_count + protein_count + dna_count:,}")
     print("="*60)
 
-    # STEP 6 (optional): PACK
-    # pack_all([smiles_chunks, protein_chunks, dna_chunks], "data")
-
-    print("\n✓ ALL DONE!")
-
+    print("\nALL DONE")
 
 if __name__ == "__main__":
     main()
