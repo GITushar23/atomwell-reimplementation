@@ -18,12 +18,10 @@ class StreamingPackedDataset(IterableDataset):
         self.sep_id = vocab["[SEP]"]
         self.eos_id = vocab["[EOS]"]
 
-        # Group files by domain for mixed-domain sampling
         self.smiles_files = [str(p) for p in sorted((DATA_ROOT / "chunks/smiles").glob("*.pkl"))]
         self.protein_files = [str(p) for p in sorted((DATA_ROOT / "chunks/proteins").glob("*.pkl"))]
         self.dna_files = [str(p) for p in sorted((DATA_ROOT / "chunks/dna").glob("*.pkl"))]
 
-        # For non-mixed mode, create flat list as before
         self.files = []
         self.files.extend([(f, 0) for f in self.smiles_files])
         self.files.extend([(f, 1) for f in self.protein_files])
@@ -55,7 +53,6 @@ class StreamingPackedDataset(IterableDataset):
             end = start + per_worker if worker_info.id < worker_info.num_workers - 1 else len(self.files)
             files = self.files[start:end]
 
-        # shuffled deterministically based on worker's RNG state (set in worker_init_fn)
         random.shuffle(files)
 
         current_tok, current_dom, current_pos = [], [], []
@@ -65,15 +62,12 @@ class StreamingPackedDataset(IterableDataset):
             with open(filepath, 'rb') as f:
                 seqs = pickle.load(f)
 
-            # deterministic given worker seed
             random.shuffle(seqs)
 
             for seq in seqs:
-                # Append EOS token to each sequence
                 seq_with_eos = list(seq) + [self.eos_id]
                 seq_len = len(seq_with_eos)
 
-                # Truncate sequences that are too long
                 if seq_len > self.max_len:
                     seq_with_eos = seq_with_eos[:self.max_len]
                     seq_len = self.max_len
@@ -101,8 +95,6 @@ class StreamingPackedDataset(IterableDataset):
         print(f"[Worker {worker_id}] Epoch complete: {count} packed sequences")
 
     def _iter_mixed_domains(self, worker_info, worker_id):
-        """Mixed-domain iteration - interleave sequences from all domains using streaming"""
-        # Split files per worker
         def split_files_for_worker(file_list):
             if worker_info is None:
                 return file_list
@@ -115,14 +107,11 @@ class StreamingPackedDataset(IterableDataset):
         protein_files = split_files_for_worker(self.protein_files)
         dna_files = split_files_for_worker(self.dna_files)
 
-        # Shuffle each domain's files
         random.shuffle(smiles_files)
         random.shuffle(protein_files)
         random.shuffle(dna_files)
 
-        # Create iterators for each domain that yield (sequence, domain_id)
         def sequence_iterator(file_list, domain_id):
-            """Generator that yields sequences from a list of files"""
             for filepath in file_list:
                 with open(filepath, 'rb') as f:
                     seqs = pickle.load(f)
@@ -130,23 +119,18 @@ class StreamingPackedDataset(IterableDataset):
                 for seq in seqs:
                     yield (seq, domain_id)
 
-        # Create iterators for each domain
         smiles_iter = sequence_iterator(smiles_files, 0)
         protein_iter = sequence_iterator(protein_files, 1)
         dna_iter = sequence_iterator(dna_files, 2)
 
-        # Weighted random sampling based on domain_weights
-        # This is MUCH faster than min-count balancing (3-4s vs 9s per batch)
         iterators = [smiles_iter, protein_iter, dna_iter]
-        active_iterators = [0, 1, 2]  # Track which iterators are still active
-        domain_token_counts = [0, 0, 0]  # Track tokens per domain for logging
+        active_iterators = [0, 1, 2]     
+        domain_token_counts = [0, 0, 0]  
 
         current_tok, current_dom, current_pos = [], [], []
         count = 0
 
         while active_iterators:
-            # Fast weighted random selection
-            # Renormalize weights for active iterators only
             active_weights = [self.domain_weights[i] for i in active_iterators]
             total_weight = sum(active_weights)
             normalized_weights = [w / total_weight for w in active_weights]
@@ -155,16 +139,13 @@ class StreamingPackedDataset(IterableDataset):
             try:
                 seq, domain = next(iterators[domain_idx])
 
-                # Append EOS token to each sequence
                 seq_with_eos = list(seq) + [self.eos_id]
                 seq_len = len(seq_with_eos)
 
-                # Truncate sequences that are too long
                 if seq_len > self.max_len:
                     seq_with_eos = seq_with_eos[:self.max_len]
                     seq_len = self.max_len
 
-                # Update token count for this domain
                 domain_token_counts[domain] += seq_len
 
                 if len(current_tok) + seq_len + 1 > self.max_len:
@@ -184,10 +165,8 @@ class StreamingPackedDataset(IterableDataset):
                     current_pos.extend(list(range(seq_len)))
 
             except StopIteration:
-                # This iterator is exhausted, remove it
                 active_iterators.remove(domain_idx)
 
-        # Yield any remaining packed sequence
         if current_tok:
             yield (current_tok, current_dom, current_pos)
             count += 1
@@ -205,9 +184,7 @@ def collate_packed(batch):
     domains = torch.zeros(B, L, dtype=torch.long)
     positions = torch.zeros(B, L, dtype=torch.long)
 
-    # Track sequence boundaries within each packed sample
-    # We need to identify where each sub-sequence starts based on position resets
-    seq_boundaries_list = []  # List of lists: one per batch item
+    seq_boundaries_list = []  
 
     vocab = np.load(DATA_ROOT / "vocab.npy", allow_pickle=True).item()
     sep_id = vocab["[SEP]"]
@@ -217,12 +194,8 @@ def collate_packed(batch):
         domains[i, :len(d)] = torch.tensor(d, dtype=torch.long)
         positions[i, :len(p)] = torch.tensor(p, dtype=torch.long)
 
-        # Find sequence boundaries by detecting position resets
-        # When position resets to 0 (and we're not at the start), it's a new sequence
         boundaries = [0]  # Start of first sequence
         for j in range(1, len(p)):
-            # Position reset to 0 indicates new sequence start
-            # (previous position should be higher, and current is 0)
             if p[j] == 0 and p[j-1] != 0:
                 boundaries.append(j)
         boundaries.append(len(t))  # End of last sequence
@@ -238,10 +211,6 @@ def collate_packed(batch):
 
 
 def _worker_init_fn(worker_id):
-    """
-    Make Python's random and NumPy deterministic per worker, using
-    the seed that PyTorch assigns to this worker.
-    """
     worker_info = torch.utils.data.get_worker_info()
     if worker_info is None:
         return
@@ -251,14 +220,6 @@ def _worker_init_fn(worker_id):
 
 
 def make_dataloader(batch_size=16, num_workers=4, mix_domains=True, domain_weights=(0.8, 0.15, 0.05)):
-    """
-    Args:
-        domain_weights: (SMILES, protein, DNA) sampling probabilities.
-            Default (0.6, 0.3, 0.1) compensates for sequence length differences:
-            - SMILES: shortest sequences, sampled most frequently (60%)
-            - Protein: medium sequences (30%)
-            - DNA: longest sequences, sampled least (10%)
-    """
     return DataLoader(
         StreamingPackedDataset(mix_domains=mix_domains, domain_weights=domain_weights),
         batch_size=batch_size,
