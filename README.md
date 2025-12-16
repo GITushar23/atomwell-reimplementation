@@ -138,7 +138,7 @@ RoPE is applied using the per-sequence position indices from packing (`rotary_em
 - **Memory optimization:** Gradient checkpointing disabled
 - **Sequence length:** 2048 tokens (packed)
 - **Diffusion steps:** T=100
-- **Attention:** Bidirectional (non-causal) FlashAttention 3
+- **Attention:** Bidirectional (non-causal) FlashAttention 2
 
 ## Compute Setup
 
@@ -168,7 +168,7 @@ This tokenizes and packs sequences into 2048-token chunks with mixed-domain batc
 ## File Structure
 
 - **module.py** - Transformer layers, layer norms, positional embeddings
-- **multihead_attention.py** - Multi-head attention with FlashAttention 3 varlen support and RoPE
+- **multihead_attention.py** - Multi-head attention with FlashAttention 2 varlen support and RoPE
 - **rotary_embedding.py** - Rotary positional encoding implementation
 - **diffusion.py** - D3PM discrete diffusion process (forward q_sample, reverse p_sample)
 - **model.py** - ESMDiffusion model architecture with domain conditioning
@@ -202,7 +202,7 @@ For continuing training on a fresh machine:
 python setup_instance.py
 ```
 
-Installs dependencies (including FlashAttention 3), downloads data chunks and latest checkpoint from Drive.
+Installs dependencies (including FlashAttention 2), downloads data chunks and latest checkpoint from Drive.
 
 ## Automatic Checkpoint Backup
 
