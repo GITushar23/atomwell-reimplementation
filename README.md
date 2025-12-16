@@ -21,7 +21,7 @@ Download preprocessed data and model checkpoint: [Google Drive](https://drive.go
 
 **Training throughput:** 20-30k tokens/sec on Lightning.ai H200 GPUs (measured as non-padding tokens processed per second through forward + backward + optimizer step)
 
-**Note on training:** I made an architecture change mid-training (added layer norm) due to compute constraints. Ideally this would require restarting, but given limited resources, I continued from the checkpoint. The model still converges and generates reasonable sequences, though performance could be better with a clean run.
+**Note on training:** I made an architecture change mid-training (added layer norm). Ideally this would require restarting, but given limited resources, I continued from the checkpoint. The model still converges and generates reasonable sequences, though performance could be better with a clean run.
 
 ## Model Architecture
 
